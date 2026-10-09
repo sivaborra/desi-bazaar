@@ -1,0 +1,24 @@
+flowchart LR
+    Buyer([" Buyer "])
+    Seller([" Seller "])
+    Admin([" Admin "])
+    subgraph System["Desi Bazaar — Phase 1"]
+        direction TB
+        UC1(["Browse & search listings"])
+        UC2(["Purchase via direct Swish"])
+        UC3(["Chat with counterparty"])
+        UC4(["Review transaction"])
+        UC5(["Open dispute / withdraw"])
+        UC6(["Apply as seller"])
+        UC7(["Create & manage listings"])
+        UC8(["Confirm payment & dispatch"])
+        UC9(["Handle returns & refunds"])
+        UC10(["Verify sellers (checklist)"])
+        UC11(["Mediate disputes"])
+        UC12(["Moderate content & reports"])
+        UC13(["Pause service / manage SLAs"])
+    end
+    Buyer --- UC1 & UC2 & UC3 & UC4 & UC5
+    Seller --- UC6 & UC7 & UC8 & UC9 & UC3
+    Admin --- UC10 & UC11 & UC12 & UC13
+    style System fill:#f0f4ff,stroke:#1f3a5f

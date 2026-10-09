@@ -1,0 +1,4 @@
+TestRoboto.ttf: Roboto variable font (ofl/roboto in the google/fonts repo),
+SIL Open Font License 1.1. Bundled for widget-test text rendering only —
+never shipped as the app's brand font. Source:
+https://github.com/google/fonts/tree/main/ofl/roboto

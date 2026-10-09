@@ -1,0 +1,21 @@
+sequenceDiagram
+    actor B as Buyer
+    participant App as Desi Bazaar app
+    participant S as Seller
+    participant Sw as Buyer's Swish app
+    participant SwS as Seller's Swish app
+    B->>App: Reserve listing → order_placed
+    App->>App: Atomic stock check + reservation (stock_reserved)
+    App->>B: Show approved Swish recipient + exact SEK amount
+    Note over B,Sw: Buyer pays OUTSIDE the app
+    B->>Sw: Pay seller directly
+    B->>App: Tap "I've paid" (assertion, not proof)
+    App->>App: payment_reported — stock release stopped
+    App->>S: Notify: payment reported, verify receipt
+    S->>SwS: Check actual incoming Swish payment
+    S->>App: Confirm receipt
+    App->>App: payment_seller_confirmed — dispatch unlocked
+    S->>App: Mark dispatched
+    App->>B: Notify dispatch - delivery evidence or confirm receipt
+    B->>App: Confirm receipt (receipt_confirmed)
+    B->>App: Leave review (one per order)

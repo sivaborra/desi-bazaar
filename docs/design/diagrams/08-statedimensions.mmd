@@ -1,0 +1,18 @@
+---
+title: Order state dimensions — payment + fulfilment (partial overview)
+---
+stateDiagram-v2
+    [*] --> payment_unreported
+    payment_unreported --> payment_reported : buyer reports
+    payment_reported --> payment_seller_confirmed : seller confirms
+    payment_reported --> payment_unresolved : 24h silence
+    payment_unreported --> payment_unresolved : late report
+    payment_unresolved --> payment_seller_confirmed : verified + allocated
+    payment_unresolved --> refund_requested : allocation lost
+    payment_unresolved --> payment_established_unpaid : established
+    [*] --> stock_reserved : atomic reservation
+    stock_reserved --> stock_released : unpaid expiry
+    stock_reserved --> dispatched : payment confirmed
+    dispatched --> receipt_confirmed : buyer confirms
+    dispatched --> delivery_evidenced : carrier / handover
+    dispatched --> delivery_unconfirmed : evidence window lapse

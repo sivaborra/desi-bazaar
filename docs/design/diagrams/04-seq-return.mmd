@@ -1,0 +1,22 @@
+sequenceDiagram
+    actor B as Buyer
+    participant App as Desi Bazaar app
+    participant S as Seller
+    B->>App: Withdrawal notice (clearly labelled function)
+    App->>App: return_requested [statutory_withdrawal]
+    App->>B: Durable acknowledgement with receipt time
+    App->>S: Deliver withdrawal notice + deadline
+    App->>B: Standard return instructions
+    Note over App,S: Statutory withdrawal needs NO seller authorisation
+    B->>App: Ship + tracking → goods_sent_back
+    App->>App: Buyer's return obligation ends (evidence)
+    alt Buyer supplies return-shipping evidence
+        B->>App: Upload tracking or drop-off receipt
+        App->>App: refund_requested (14-day clock runs from notice)
+        Note over App,S: Seller may withhold only until goods received or evidence seen
+    else Seller confirms possession
+        S->>App: Confirm possession → return_received
+        App->>App: refund_requested
+    end
+    S->>B: Refund via direct Swish
+    B->>App: Acknowledge → refund_acknowledged

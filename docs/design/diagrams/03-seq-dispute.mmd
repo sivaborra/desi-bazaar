@@ -1,0 +1,22 @@
+sequenceDiagram
+    actor B as Buyer
+    participant App as Desi Bazaar app
+    participant A as Admin
+    participant S as Seller
+    B->>App: Open dispute (reason + structured evidence)
+    App->>A: Queue case — SLA timers start (ack 1d, decision 5d)
+    A->>S: Request evidence
+    S->>A: Submit evidence
+    A->>A: Mediate — record proposed outcome separately
+    A->>B: Propose outcome
+    A->>S: Propose outcome
+    alt Parties agree: refund
+        Note over S: Platform cannot move money (Phase 1)
+        S->>B: Refund via direct Swish
+        B->>App: Acknowledge receipt
+        App->>App: remedy_acknowledged → dispute_resolved
+    else Seller non-cooperation
+        A->>App: Record unresolved_non_compliant
+        App->>S: Proportionate restriction (human-reviewed)
+        App->>B: Explain limits + external remedies info
+    end

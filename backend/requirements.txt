@@ -1,0 +1,5 @@
+# Desi Bazaar vertical slice — backend dependencies (verified 2026-10-09)
+fastapi==0.143.0
+uvicorn==0.54.0
+httpx==0.28.1
+pytest==9.1.1

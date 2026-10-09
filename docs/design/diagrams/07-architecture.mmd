@@ -1,0 +1,28 @@
+flowchart TB
+    subgraph Client["Flutter app — Android + iOS"]
+        UI["UI: browse · checkout · chat · reviews"]
+    end
+    subgraph Backend["Backend API"]
+        API["REST API — authorisation enforced server-side"]
+        TE["Transition engine (§11 state model)"]
+        MOD["AI moderation assist (human decides)"]
+        NOTIF["Notifications — push / SMS"]
+    end
+    subgraph Data["PostgreSQL"]
+        DB[("Users · sellers · listings · orders (5 dimensions) · audit log")]
+    end
+    subgraph AdminUI["Admin console — web, MFA enforced"]
+        Q["Queues: sellers · disputes · reports · SLAs"]
+    end
+    subgraph Ext["External"]
+        OTP["OTP provider"]
+        SW[("Swish — buyer's own app (outside platform)")]
+    end
+    UI --> API
+    API --> TE --> DB
+    API --> MOD
+    API --> NOTIF
+    API --> OTP
+    Q --> API
+    UI -.->|"direct payment, no platform custody"| SW
+    style TE fill:#e8f4e8,stroke:#2a6b2a

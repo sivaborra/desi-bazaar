@@ -1,0 +1,25 @@
+# Secrets & credentials
+.env
+*.jks
+*.keystore
+key.properties
+local.properties
+google-services.json
+GoogleService-Info.plist
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Flutter
+build/
+.dart_tool/
+.idea/
+*.iml
+ios/Pods/
+android/.gradle/
+
+# Build artifacts
+*.zip

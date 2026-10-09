@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dev only: allow cleartext HTTP to dev backends.
+     10.0.2.2 = Android emulator loopback to host.
+     192.168.1.66 = Siva's dev PC on the LAN (physical-device testing);
+     update if DHCP reassigns the PC's address.
+     Production builds must use HTTPS (no cleartext exception). -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">192.168.1.66</domain>
+    </domain-config>
+</network-security-config>

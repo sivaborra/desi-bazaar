@@ -1,0 +1,515 @@
+openapi: 3.0.3
+info:
+  title: Desi Bazaar API
+  version: 1.0.0
+  description: >
+    Phase-1 marketplace API. All order mutations go through POST /v1/commands
+    (design §9). Actor identity is derived from the authenticated session.
+servers:
+  - url: https://api.desibazaar.se/v1
+paths:
+  /commands:
+    post:
+      summary: Execute an order command (all mutations)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '200':
+          description: Committed; returns new dimensions and version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResult'
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: VERSION_CONFLICT or OPERATION_CONFLICT; no writes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /orders/{id}:
+    get:
+      summary: Order with five dimensions, snapshot, refund ledger
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /listings:
+    get:
+      summary: Search / filter listings (FR-B2); active promotions rank first with "Sponsored" label (SC-1)
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: size, in: query, schema: { type: string } }
+        - { name: max_price, in: query, schema: { type: integer } }
+        - { name: condition, in: query, schema: { type: string } }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Listing' } }
+    post:
+      summary: Create listing (approved sellers only); accepts media_ids ≤8 images + ≤2 videos (SC-2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ListingInput' }
+      responses:
+        '201': { description: Created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { description: Media not accepted / not owned / over limit }
+  /listings/{id}/reserve:
+    post:
+      summary: Atomic reservation — creates order + immutable snapshot
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '201':
+          description: Reserved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '409': { description: No unit available }
+  /sellers/applications:
+    post:
+      summary: Submit seller application (FR-S1); enters pending, cannot list (FR-S2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SellerApplication' }
+      responses:
+        '201': { description: Pending }
+        '422': { description: Missing/invalid fields; re-application limit untouched }
+  /sellers/me/recipient:
+    patch:
+      summary: Change Swish recipient — requires fresh OTP re-auth, sets hold, notifies (FR-S6)
+      responses:
+        '200': { description: Updated; new orders blocked until admin re-verifies }
+        '403': { description: Fresh OTP verification required }
+  /sellers/{id}/profile:
+    get:
+      summary: Public seller profile — badge scope+date only; fulfilment history split (DB-TC-006/147)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SellerProfile' }
+  /auth/otp/request:
+    post:
+      summary: Request OTP code (FR-B1); phone or email; max 5 per 10 min per identifier (NFR-S1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone: { type: string, description: 'Phone identifier (one of phone/email required)' }
+                email: { type: string, description: 'Email identifier, lowercased by server (one of phone/email required)' }
+      responses:
+        '200': { description: Code generated (synthetic) }
+        '429': { description: Rate limited }
+  /auth/otp/verify:
+    post:
+      summary: Verify OTP code; marks user otp_verified (FR-B1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone: { type: string }
+                code: { type: string }
+      responses:
+        '200': { description: Verified }
+        '422': { description: Invalid or expired code }
+  /admin/sellers/{id}/decision:
+    post:
+      summary: Versioned checklist approve/reject — records reviewer identity + timestamp (FR-S3)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SellerDecision' }
+      responses:
+        '200': { description: Decision recorded }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/sellers/{id}/recipient/verify:
+    post:
+      summary: Admin re-verification after recipient change; clears hold (FR-S6)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Hold cleared }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /orders/{id}/chat/messages:
+    post:
+      summary: Post chat message (order-bound, FR-C1)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '201': { description: Sent }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /orders/{id}/review:
+    post:
+      summary: One review per order (FR-R1)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                text: { type: string }
+      responses:
+        '201': { description: Submitted for moderation }
+        '422': { description: Not eligible to review }
+  /users/me/deletion:
+    post:
+      summary: Start account deletion (FR-DEL1)
+      responses:
+        '202': { description: Deletion flow started }
+  /admin/seller-queue:
+    get:
+      summary: Seller verification queue (MFA, FR-A1/A2)
+      responses:
+        '200': { description: Queue with owners + SLA timers }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/service/pause:
+    post:
+      summary: Pause new orders/onboarding (FR-A3)
+      responses:
+        '200': { description: Paused }
+  /media/upload-url:
+    post:
+      summary: Media upload step 1 — signed URL (SC-2); slice stubs the object store
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MediaUploadUrlRequest' }
+      responses:
+        '201':
+          description: URL issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaUploadUrl' }
+        '422': { description: Purpose/content_type/size rejected }
+  /media/{id}/bytes:
+    put:
+      summary: Media upload step 2 — bytes go here (slice stub store)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Received }
+        '422': { description: Byte length != declared }
+  /media/{id}/complete:
+    post:
+      summary: Media upload step 3 — validate type/size/content + checksum, queue moderation (SC-2)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MediaCompleteRequest' }
+      responses:
+        '200':
+          description: '{status: accepted|rejected, reason?}'
+  /media/{id}:
+    get:
+      summary: Serve media bytes (slice); production returns a signed read URL
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Bytes }
+        '404': { description: Not found / not accepted }
+  /ads/config:
+    get:
+      summary: Promotion pricing config (SC-1)
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdsConfig' }
+  /admin/ads/config:
+    put:
+      summary: Update promotion pricing (admin, SC-1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdsConfig' }
+      responses:
+        '200': { description: Updated }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /ads/promotions:
+    post:
+      summary: Seller buys a boost for an owned listing (SC-1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromotionInput' }
+      responses:
+        '201':
+          description: '{promotion_id, state: pending_payment, amount_sek}'
+        '422': { description: Invalid days / listing not eligible }
+  /ads/promotions/{id}/pay:
+    post:
+      summary: "Stub promotion payment (SC-1); production: Swish Företag to Baltic Systems AB"
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{promotion_id, state: pending_review}' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { description: Not in pending_payment }
+  /admin/ads/promotions/{id}/decision:
+    post:
+      summary: Admin review — approve (→ active, sets expires_at) or reject (SC-1)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve: { type: boolean }
+                reason: { type: string }
+      responses:
+        '200':
+          description: '{promotion_id, state, expires_at?}'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Promotion' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /ads/slot:
+    get:
+      summary: Sponsored slot inventory — active promotions round-robin or empty (SC-1)
+      parameters:
+        - { name: placement, in: query, required: true, schema: { type: string, enum: [feed] } }
+      responses:
+        '200': { description: '{type: none|promotion, ...}' }
+components:
+  schemas:
+    CommandRequest:
+      type: object
+      required: [operation_id, order_id, operation]
+      properties:
+        operation_id: { type: string, format: uuid, description: Stable client-generated ID per logical operation }
+        order_id: { type: string, format: uuid }
+        operation: { type: string, example: report_payment }
+        expected_order_version: { type: integer }
+        payload: { type: object }
+        evidence_references: { type: array, items: { type: string } }
+    CommandResult:
+      type: object
+      properties:
+        order_id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        replayed: { type: boolean, description: True when returning a recorded result }
+        dimensions:
+          type: object
+          properties:
+            payment: { type: string }
+            fulfilment: { type: string }
+            cancel_refund: { type: string }
+            dispute: { type: string }
+            return: { type: string }
+        order_version: { type: integer }
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        dimensions:
+          type: object
+          properties:
+            payment: { type: string }
+            fulfilment: { type: string }
+            cancel_refund: { type: string }
+            dispute: { type: string }
+            return: { type: string }
+        order_version: { type: integer }
+        snapshot: { type: object, description: Immutable checkout snapshot }
+        refund_ledger:
+          type: array
+          items: { type: object }
+          description: Refund-action records; totals derived
+    Listing:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        category: { type: string }
+        condition: { type: string }
+        size_text: { type: string }
+        price_sek: { type: integer }
+        seller_badge: { type: object, description: Scope + date, never a product guarantee }
+        seller_id: { type: string, description: Owning seller principal (BUG-005 fix) }
+        promoted: { type: boolean, description: True when an active promotion ranks this first (SC-1) }
+        label:
+          type: string
+          nullable: true
+          description: '"Sponsored" only when promoted; null otherwise (DB-TC-189)'
+        media:
+          type: array
+          items: { $ref: '#/components/schemas/ListingMedia' }
+    ListingMedia:
+      type: object
+      properties:
+        media_id: { type: string }
+        kind: { type: string, enum: [image, video] }
+        thumb_url: { type: string }
+    ListingInput:
+      type: object
+      required: [category, condition, size_text, price_sek]
+      properties:
+        category: { type: string }
+        condition: { type: string }
+        size_text: { type: string }
+        defect_disclosure: { type: string }
+        price_sek: { type: integer, minimum: 1 }
+        fulfilment_options: { type: object }
+        media_ids:
+          type: array
+          items: { type: string }
+          description: Max 8 images + max 2 videos; each accepted and owned by the seller (SC-2)
+    MediaUploadUrlRequest:
+      type: object
+      required: [purpose, content_type, content_length]
+      properties:
+        purpose:
+          type: string
+          enum: [listing_image, listing_video, dispute_evidence, id_document]
+        content_type: { type: string, description: image/jpeg|png|webp; video/mp4 for video }
+        content_length: { type: integer, description: Image ≤10MB, video ≤100MB }
+    MediaUploadUrl:
+      type: object
+      properties:
+        media_id: { type: string }
+        upload_url: { type: string }
+        expires_at: { type: string, format: date-time }
+    MediaCompleteRequest:
+      type: object
+      properties:
+        checksum: { type: string, description: SHA-256 of uploaded bytes }
+    AdsConfig:
+      type: object
+      properties:
+        currency: { type: string, example: SEK }
+        prices:
+          type: object
+          description: Days → price in SEK
+          example: { "1": 29, "3": 69, "7": 129 }
+    PromotionInput:
+      type: object
+      required: [listing_id, days]
+      properties:
+        listing_id: { type: string }
+        days: { type: integer, enum: [1, 3, 7] }
+    Promotion:
+      type: object
+      properties:
+        promotion_id: { type: string }
+        listing_id: { type: string }
+        seller_id: { type: string }
+        days: { type: integer }
+        amount_sek: { type: integer }
+        state:
+          type: string
+          enum: [pending_payment, pending_review, active, rejected, expired]
+        expires_at: { type: string, format: date-time }
+    SellerApplication:
+      type: object
+      required: [name, phone, id_document_ref, categories, trader]
+      properties:
+        name: { type: string }
+        phone: { type: string }
+        id_document_ref: { type: string, description: Opaque encrypted object ref, never raw bytes }
+        trader: { type: boolean }
+        trader_basis: { type: string }
+        categories: { type: array, items: { type: string } }
+        profile: { type: string }
+        swish_recipient: { type: string }
+    SellerDecision:
+      type: object
+      required: [decision, checklist_version]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        checklist_version: { type: string }
+        evidence_reviewed: { type: array, items: { type: string } }
+        checks: { type: array, items: { type: string } }
+        reason: { type: string, description: Required for rejection }
+    SellerProfile:
+      type: object
+      properties:
+        seller_id: { type: string }
+        name: { type: string }
+        status: { type: string }
+        badge:
+          type: object
+          nullable: true
+          description: Scope + date only; never product-guarantee wording
+          properties:
+            scope: { type: string, example: ID verified }
+            date: { type: string, format: date }
+        fulfilment_history:
+          type: object
+          description: Evidenced vs unconfirmed shown separately (DB-TC-147)
+          properties:
+            evidenced: { type: integer }
+            unconfirmed: { type: integer }
+            in_progress: { type: integer }
+            total_orders: { type: integer }
+        dispute_outcomes:
+          type: object
+          properties:
+            resolved: { type: integer }
+            closed_unconfirmed: { type: integer }
+            non_compliant: { type: integer }
+        response_time:
+          type: object
+          properties:
+            value: { type: string, nullable: true }
+            basis: { type: string }
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          example: GUARD_DISPATCH_BEFORE_PAYMENT
+        message: { type: string }
+  responses:
+    Forbidden:
+      description: Authorisation denied (incl. object-level)
+    NotFound:
+      description: Not found
+    Unprocessable:
+      description: Guard or evidence failure; nothing committed

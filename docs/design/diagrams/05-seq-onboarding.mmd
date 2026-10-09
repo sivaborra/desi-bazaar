@@ -1,0 +1,15 @@
+sequenceDiagram
+    actor Sl as Seller applicant
+    participant App as Desi Bazaar app
+    participant A as Admin
+    Sl->>App: Submit application (ID photo, private/trader status)
+    App->>App: State → Pending (cannot list)
+    App->>A: Queue for verification
+    A->>A: Versioned checklist: evidence, checks, decision, reviewer, date
+    alt Approved
+        A->>App: Approve
+        App->>Sl: Verified badge (scope + date, no product guarantee)
+    else Rejected
+        A->>App: Reject with reason
+        App->>Sl: Reason given — one re-apply allowed
+    end

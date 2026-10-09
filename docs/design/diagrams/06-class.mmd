@@ -1,0 +1,81 @@
+classDiagram
+    class User {
+        +id
+        +phone
+        +otpVerified
+        +role
+    }
+    class Seller {
+        +status: private | trader
+        +idDocumentRef
+        +badgeScope
+        +badgeDate
+        +swishRecipient
+        +badgeActive
+    }
+    class Listing {
+        +category
+        +condition
+        +size
+        +priceSEK
+        +fulfilmentOptions
+        +status
+    }
+    class ListingSnapshot {
+        +listingData
+        +agreedTerms
+        +recipient
+        +amount
+    }
+    class Order {
+        +payment: PaymentState
+        +fulfilment: FulfilmentState
+        +cancel: CancelState
+        +dispute: DisputeState
+        +return: ReturnState
+    }
+    class RefundAction {
+        +amountSEK
+        +relatedClaim
+        +sellerReport
+        +buyerAck
+        +evidenceStatus
+    }
+    class ReturnRecord {
+        +returnOrigin
+        +returnBasis
+        +reason
+        +requestTime
+        +deadlines
+    }
+    class Dispute {
+        +reason
+        +evidence
+        +proposedOutcome
+        +remedyOutcome
+    }
+    class Review {
+        +rating
+        +text
+        +orderRef
+    }
+    class Buyer {
+        +id
+        +phone
+    }
+    class ListingUnit {
+        +status: available | reserved | sold
+    }
+    User <|-- Seller
+    User <|-- Buyer
+    Seller "1" --> "*" Listing : lists
+    Listing "1" --> "*" ListingUnit : has units
+    Listing "1" --> "*" ListingSnapshot : checkout creates
+    ListingSnapshot "1" --> "1" Order : spawns
+    Buyer "1" --> "*" Order : places
+    Seller "1" --> "*" Order : fulfils
+    ListingUnit "1" --> "0..1" Order : allocated to
+    Order "1" --> "*" RefundAction : records
+    Order "1" --> "0..1" ReturnRecord : linked
+    Order "1" --> "0..1" Dispute : linked
+    Order "1" --> "0..1" Review : reviewed
