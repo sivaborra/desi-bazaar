@@ -36,4 +36,4 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ## License
 
-TBD
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md) — free for personal, research, and noncommercial use. Commercial use requires a separate license: info@balticitsystems.com.
