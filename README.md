@@ -1,8 +1,24 @@
 # Desi Bazaar
 
+![Desi Bazaar — Buy • Sell • Celebrate](docs/images/logo-banner.jpg)
+
 A marketplace mobile app (iOS + Android) for the South Asian community in Sweden — eBay-style buying and selling with trust built in: manual admin seller approval, AI-moderated reviews, direct buyer→seller Swish payments.
 
 Built as a portfolio/showcase project by [Baltic Systems AB](https://balticitsystems.com), demonstrating spec-first engineering: frozen requirements → adversarial review → implementation with honest test evidence.
+
+## Screenshots
+
+| Sign in | Browse | Listing |
+|---|---|---|
+| ![Sign in](docs/images/screen-auth.png) | ![Browse](docs/images/screen-browse.png) | ![Listing detail](docs/images/screen-listing.png) |
+
+| Seller home | Admin queue |
+|---|---|
+| ![Seller home](docs/images/screen-seller.png) | ![Admin queue](docs/images/screen-admin.png) |
+
+## Architecture
+
+![System architecture](docs/images/architecture.png)
 
 ## Status
 
