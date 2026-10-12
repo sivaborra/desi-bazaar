@@ -8,17 +8,13 @@ Built as a portfolio/showcase project by [Baltic Systems AB](https://balticitsys
 
 ## Screenshots (v1.12.3, 2026-10-12)
 
-| Browse (Diwali theme) | Seller home | Create listing |
+| Browse (Diwali festive theme) | Create listing with photo | Listing detail + Swish checkout |
 |---|---|---|
-| ![Browse](docs/images/screen-browse-diwali.jpg) | ![Seller](docs/images/screen-seller.jpg) | ![Create listing](docs/images/screen-create-listing.jpg) |
+| ![Browse](docs/images/screen-browse-diwali.jpg) | ![Create listing](docs/images/screen-create-listing-photo.jpg) | ![Listing detail](docs/images/screen-listing-detail.jpg) |
 
-| Listing detail + checkout | Order tracker | Appearance themes |
-|---|---|---|
-| ![Listing detail](docs/images/screen-listing-detail.jpg) | ![Order tracker](docs/images/screen-order-tracker.jpg) | ![Appearance](docs/images/screen-appearance.jpg) |
-
-| Registration | Become a seller | Promote listing |
-|---|---|---|
-| ![Register](docs/images/screen-register.jpg) | ![Become seller](docs/images/screen-become-seller.jpg) | ![Promote](docs/images/screen-promote-pricing.jpg) |
+| Seller dashboard | Registration with GDPR consent |
+|---|---|
+| ![Seller](docs/images/screen-seller.jpg) | ![Register](docs/images/screen-register.jpg) |
 
 ## Architecture
 
