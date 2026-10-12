@@ -92,8 +92,10 @@ cd /mnt/d/phone/Desi-Bazaar-Complete-Package/implementation-review/vertical-slic
 - **Email OTP**: Turbify account `assistant@balticitsystems.com` accepts SMTP login but refuses to send (554 error). Account-level restriction — needs Turbify support.
 - **Named tunnel DNS**: IPv6-only, unreachable. Backlogged.
 
-### ⏳ Pending
+### ⏳ Pending / Backlog
+- **Edit/update listing**: needs backend PATCH endpoint + UI (backlogged 2026-10-12)
+- **Named tunnel DNS**: Cloudflare returns IPv6-only ULA, unreachable (backlogged)
+- **Email OTP**: Turbify blocking outbound SMTP, needs Siva to contact support
 - Real launcher icon
 - Nightly regression registration
 - Production hardening (in-memory storage, session tokens, DAC7 legal review)
-- GitHub push of v12 commit (needs Siva's token)
