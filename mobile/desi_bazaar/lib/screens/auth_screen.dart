@@ -1,12 +1,17 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../api/models.dart';
 import '../main.dart';
+import '../version.dart';
 import '../widgets/widgets.dart';
+import 'about_screen.dart';
+import 'registration_screen.dart';
 
-/// Phone or email -> OTP sign-in (FR-B1). The backend slice only issues
-/// synthetic codes (logged to its console, never SMS/email) — the debug
-/// banner says so.
+/// Phone or email -> OTP sign-in (FR-B1, FR-B1a–c). The backend slice only
+/// issues synthetic codes (logged to its console, never SMS/email) — the
+/// debug banner says so.
 ///
 /// For the slice demo there are also one-tap dev sign-ins for the synthetic
 /// principals. They are clearly labelled and must not ship.
@@ -18,40 +23,72 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  final _identifier = TextEditingController();
+  final _phone = TextEditingController();
+  final _email = TextEditingController();
   final _code = TextEditingController();
-  bool _useEmail = false;
   bool _codeSent = false;
   bool _busy = false;
+  bool _useEmail = false;
+
+  static const _channelKey = 'desi_auth_channel';
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreChannel();
+  }
+
+  Future<void> _restoreChannel() async {
+    final prefs = await SharedPreferences.getInstance();
+    final channel = prefs.getString(_channelKey);
+    if (channel == 'email' && mounted) {
+      setState(() => _useEmail = true);
+    }
+  }
+
+  Future<void> _saveChannel() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_channelKey, _useEmail ? 'email' : 'phone');
+  }
+
+  /// Simplified RFC 5322 email validation (FR-B1c).
+  static bool isValidEmail(String email) {
+    return RegExp(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        .hasMatch(email);
+  }
 
   @override
   void dispose() {
-    _identifier.dispose();
+    _phone.dispose();
+    _email.dispose();
     _code.dispose();
     super.dispose();
   }
 
-  String? _validateIdentifier(String value) {
-    if (value.isEmpty) {
-      return _useEmail ? 'Enter your email first.' : 'Enter your phone number first.';
-    }
-    if (_useEmail && !RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(value)) {
-      return 'That does not look like an email address.';
-    }
-    return null;
-  }
-
   Future<void> _request() async {
     final api = AppScope.of(context).api;
-    final identifier = _identifier.text.trim();
-    final problem = _validateIdentifier(identifier);
-    if (problem != null) {
-      showInfo(context, problem);
-      return;
-    }
     setState(() => _busy = true);
     try {
-      await api.requestOtp(identifier);
+      if (_useEmail) {
+        final email = _email.text.trim();
+        if (email.isEmpty) {
+          showInfo(context, 'Enter your email address first.');
+          return;
+        }
+        if (!isValidEmail(email)) {
+          showInfo(context, 'That email address does not look valid.');
+          return;
+        }
+        await api.requestEmailOtp(email);
+      } else {
+        final phone = _phone.text.trim();
+        if (phone.isEmpty) {
+          showInfo(context, 'Enter your phone number first.');
+          return;
+        }
+        await api.requestOtp(phone);
+      }
+      await _saveChannel();
       setState(() => _codeSent = true);
       if (mounted) {
         showInfo(context,
@@ -66,18 +103,50 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> _verify() async {
     final scope = AppScope.of(context);
-    final identifier = _identifier.text.trim();
     final code = _code.text.trim();
     setState(() => _busy = true);
     try {
-      final userId = await scope.api.verifyOtp(identifier, code);
+      final OtpVerifyResult result;
+      final String displayName;
+      if (_useEmail) {
+        final email = _email.text.trim();
+        result = await scope.api.verifyEmailOtpResult(email, code);
+        displayName = email;
+      } else {
+        final phone = _phone.text.trim();
+        result = await scope.api.verifyOtpResult(phone, code);
+        displayName = phone;
+      }
+      if (!mounted) return;
+      setState(() => _busy = false);
+      if (result.isNewUser) {
+        // FR-B1d: first-time user → Registration screen with GDPR consent.
+        // Account is created only after explicit consent.
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => RegistrationScreen(
+              phone: _useEmail ? null : _phone.text.trim(),
+              email: _useEmail ? _email.text.trim() : null,
+            ),
+          ),
+        );
+        // If the user backed out without registering, stay on auth screen
+        // (CC3 — no account created, no orphaned record).
+        return;
+      }
+      // Returning user — sign in directly.
       // Slice-1 has no session tokens yet; the verified user id becomes the
-      // dev principal. New identifiers register as buyers (FR-B1).
-      scope.session.signIn(principal: userId, role: 'buyer', displayName: identifier);
+      // dev principal.
+      scope.session
+          .signIn(principal: result.userId!, role: 'buyer', displayName: displayName);
     } catch (e) {
-      if (mounted) showApiError(context, e);
+      if (mounted) {
+        showApiError(context, e);
+      }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+      }
     }
   }
 
@@ -102,12 +171,22 @@ class _AuthScreenState extends State<AuthScreen> {
               child: Padding(
                 padding: EdgeInsets.all(12),
                 child: Text(
-                  'DEV BUILD — phone/email + OTP stub only (no BankID, per FR-B1). '
-                  'Codes are synthetic and printed to the backend console, never sent.',
+                  'DEV BUILD — phone + OTP stub only (no BankID, per FR-B1). '
+                  'Codes are synthetic and printed to the backend console, never sent by SMS.',
                   style: TextStyle(fontSize: 12),
                 ),
               ),
             ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(24),
+            child: Image.asset(
+              'assets/logo.webp',
+              width: 120,
+              height: 120,
+              fit: BoxFit.cover,
+            ),
+          ),
           const SizedBox(height: 12),
           const Text(
             'Not just a bridge but a brand.',
@@ -118,31 +197,38 @@ class _AuthScreenState extends State<AuthScreen> {
           const SizedBox(height: 20),
           SegmentedButton<bool>(
             segments: const [
-              ButtonSegment(value: false, label: Text('Phone'), icon: Icon(Icons.phone)),
-              ButtonSegment(value: true, label: Text('Email'), icon: Icon(Icons.email)),
+              ButtonSegment(value: false, label: Text('Phone')),
+              ButtonSegment(value: true, label: Text('Email')),
             ],
             selected: {_useEmail},
-            onSelectionChanged: (s) {
+            onSelectionChanged: (selection) {
               setState(() {
-                _useEmail = s.first;
+                _useEmail = selection.first;
                 _codeSent = false;
-                _identifier.clear();
-                _code.clear();
               });
             },
           ),
           const SizedBox(height: 12),
-          TextField(
-            controller: _identifier,
-            keyboardType:
-                _useEmail ? TextInputType.emailAddress : TextInputType.phone,
-            autocorrect: false,
-            decoration: InputDecoration(
-              labelText: _useEmail ? 'Email address' : 'Phone number',
-              hintText: _useEmail ? 'name@example.se' : '+46700123456',
-              border: const OutlineInputBorder(),
+          if (_useEmail)
+            TextField(
+              controller: _email,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(
+                labelText: 'Email address',
+                hintText: 'you@example.se',
+                border: OutlineInputBorder(),
+              ),
+            )
+          else
+            TextField(
+              controller: _phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: 'Phone number',
+                hintText: '+46700123456',
+                border: OutlineInputBorder(),
+              ),
             ),
-          ),
           const SizedBox(height: 12),
           if (_codeSent) ...[
             TextField(
@@ -185,6 +271,18 @@ class _AuthScreenState extends State<AuthScreen> {
                 child: const Text('Admin: admin-1'),
               ),
             ],
+          ),
+          const SizedBox(height: 24),
+          Center(
+            child: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const AboutScreen()),
+              ),
+              child: Text(
+                'v$kAppVersion ($kAppBuild) — About',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
           ),
         ],
       ),

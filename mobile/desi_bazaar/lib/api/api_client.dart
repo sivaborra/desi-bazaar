@@ -37,8 +37,27 @@ String resolveBaseUrl() {
 /// TODO(prod): replace X-Principal with the OTP session token from
 /// POST /v1/auth/otp/verify once the backend issues real sessions.
 abstract class DesiBazaarApi {
-  Future<void> requestOtp(String identifier);
-  Future<String> verifyOtp(String identifier, String code);
+  Future<void> requestOtp(String phone);
+  Future<String> verifyOtp(String phone, String code);
+
+  /// FR-B1d: verify + learn whether registration is needed.
+  Future<OtpVerifyResult> verifyOtpResult(String phone, String code);
+  Future<void> requestEmailOtp(String email);
+  Future<String> verifyEmailOtp(String email, String code);
+
+  /// FR-B1d: verify + learn whether registration is needed.
+  Future<OtpVerifyResult> verifyEmailOtpResult(String email, String code);
+
+  /// FR-B1d: complete registration after OTP verification.
+  Future<String> register({
+    String? phone,
+    String? email,
+    String? displayName,
+    required bool consentAccepted,
+    required String consentVersion,
+    required bool marketingOptIn,
+    required bool ageConfirmed,
+  });
 
   Future<List<Listing>> listListings({String? q});
   Future<OrderDetail> reserveListing(String listingId);
@@ -58,6 +77,7 @@ abstract class DesiBazaarApi {
     String? defectDisclosure,
     required int priceSek,
     List<String> mediaIds = const [],
+    String? thumbnailMediaId,
   });
 
   Future<Map<String, dynamic>> applySeller({
@@ -72,6 +92,11 @@ abstract class DesiBazaarApi {
   });
 
   Future<List<QueueApplication>> sellerQueue();
+  Future<List<AdminUser>> adminUsers();
+  Future<Map<String, dynamic>> setUserRole({
+    required String userId,
+    required String role,
+  });
   Future<Map<String, dynamic>> decideSeller({
     required String sellerId,
     required String decision,
@@ -111,6 +136,87 @@ abstract class DesiBazaarApi {
 
   /// Read URL for a media item (GET /v1/media/{id} serves bytes on slice).
   String mediaUrl(String mediaId);
+
+  /// DAC7 threshold monitoring (SC-5, FR-D4–D8). Returns null when disabled.
+  Future<Dac7Status?> dac7Status();
+  Future<String> submitTin(String tin);
+  Future<List<Dac7SellerRow>> dac7AdminSellers();
+  Future<bool> setDac7Enabled(bool enabled);
+  Future<void> setDac7SellerPaused(String sellerId, bool paused, String reason);
+}
+
+/// DAC7 seller threshold status (FR-D4).
+class Dac7Status {
+  Dac7Status({
+    required this.monitoringEnabled,
+    this.year = 0,
+    this.transactions = 0,
+    this.transactionsThreshold = 30,
+    this.eur = 0.0,
+    this.eurThreshold = 2000.0,
+    this.tier = 'none',
+    this.tinProvided = false,
+    this.tinLast4,
+    this.paused = false,
+    this.pauseReason,
+  });
+
+  final bool monitoringEnabled;
+  final int year;
+  final int transactions;
+  final int transactionsThreshold;
+  final double eur;
+  final double eurThreshold;
+  final String tier;
+  final bool tinProvided;
+  final String? tinLast4;
+  final bool paused;
+  final String? pauseReason;
+
+  factory Dac7Status.fromJson(Map<String, dynamic> j) => Dac7Status(
+        monitoringEnabled: (j['monitoring_enabled'] ?? false) as bool,
+        year: (j['year'] ?? 0) as int,
+        transactions: (j['transactions'] ?? 0) as int,
+        transactionsThreshold: (j['transactions_threshold'] ?? 30) as int,
+        eur: ((j['eur'] ?? 0) as num).toDouble(),
+        eurThreshold: ((j['eur_threshold'] ?? 2000) as num).toDouble(),
+        tier: (j['tier'] ?? 'none') as String,
+        tinProvided: (j['tin_provided'] ?? false) as bool,
+        tinLast4: j['tin_last4'] as String?,
+        paused: (j['paused'] ?? false) as bool,
+        pauseReason: j['pause_reason'] as String?,
+      );
+}
+
+/// One row of the admin DAC7 proximity view (FR-D8).
+class Dac7SellerRow {
+  Dac7SellerRow({
+    required this.sellerId,
+    required this.transactions,
+    required this.eur,
+    required this.tier,
+    required this.proximity,
+    required this.tinProvided,
+    required this.paused,
+  });
+
+  final String sellerId;
+  final int transactions;
+  final double eur;
+  final String tier;
+  final double proximity;
+  final bool tinProvided;
+  final bool paused;
+
+  factory Dac7SellerRow.fromJson(Map<String, dynamic> j) => Dac7SellerRow(
+        sellerId: (j['seller_id'] ?? '') as String,
+        transactions: (j['transactions'] ?? 0) as int,
+        eur: ((j['eur'] ?? 0) as num).toDouble(),
+        tier: (j['tier'] ?? 'none') as String,
+        proximity: ((j['proximity'] ?? 0) as num).toDouble(),
+        tinProvided: (j['tin_provided'] ?? false) as bool,
+        paused: (j['paused'] ?? false) as bool,
+      );
 }
 
 class HttpApiClient implements DesiBazaarApi {
@@ -150,16 +256,32 @@ class HttpApiClient implements DesiBazaarApi {
     throw ApiException(r.statusCode, message);
   }
 
+  /// Network calls time out after 15s so the UI never hangs on a dead
+  /// backend — the auth screen shows "Please wait…" while _busy is true.
+  static const _timeout = Duration(seconds: 15);
+
   Future<Map<String, dynamic>> _getJson(Uri uri) async {
-    final r = await http.get(uri, headers: _headers);
+    final r = await http.get(uri, headers: _headers).timeout(_timeout);
     if (r.statusCode != 200) _throwFor(r);
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
   Future<Map<String, dynamic>> _postJson(Uri uri, Map<String, dynamic> body,
-      {int ok = 200}) async {
-    final r = await http.post(uri, headers: _headers, body: jsonEncode(body));
-    if (r.statusCode != ok) _throwFor(r);
+      {Set<int> okStatuses = const {200}}) async {
+    final r = await http
+        .post(uri, headers: _headers, body: jsonEncode(body))
+        .timeout(_timeout);
+    if (!okStatuses.contains(r.statusCode)) _throwFor(r);
+    if (r.body.isEmpty) return {};
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> _patchJson(
+      Uri uri, Map<String, dynamic> body) async {
+    final r = await http
+        .patch(uri, headers: _headers, body: jsonEncode(body))
+        .timeout(_timeout);
+    if (r.statusCode != 200) _throwFor(r);
     if (r.body.isEmpty) return {};
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
@@ -173,20 +295,75 @@ class HttpApiClient implements DesiBazaarApi {
   }
 
   @override
-  Future<void> requestOtp(String identifier) async {
-    // FR-B1: phone or email. The '@' decides which field the slice expects.
-    final body = identifier.contains('@')
-        ? {'email': identifier}
-        : {'phone': identifier};
-    await _postJson(_u('/auth/otp/request'), body);
+  Future<void> requestOtp(String phone) async {
+    await _postJson(_u('/auth/otp/request'), {'phone': phone});
   }
 
   @override
-  Future<String> verifyOtp(String identifier, String code) async {
-    final body = identifier.contains('@')
-        ? {'email': identifier, 'code': code}
-        : {'phone': identifier, 'code': code};
-    final j = await _postJson(_u('/auth/otp/verify'), body);
+  Future<String> verifyOtp(String phone, String code) async {
+    final r = await verifyOtpResult(phone, code);
+    return r.userId ?? '';
+  }
+
+  @override
+  Future<OtpVerifyResult> verifyOtpResult(String phone, String code) async {
+    final j = await _postJson(_u('/auth/otp/verify'), {
+      'phone': phone,
+      'code': code,
+    });
+    return OtpVerifyResult(
+      userId: j['user_id'] as String?,
+      isNewUser: (j['is_new_user'] ?? false) as bool,
+    );
+  }
+
+  @override
+  Future<void> requestEmailOtp(String email) async {
+    await _postJson(_u('/auth/otp/request'), {'email': email});
+  }
+
+  @override
+  Future<String> verifyEmailOtp(String email, String code) async {
+    final r = await verifyEmailOtpResult(email, code);
+    return r.userId ?? '';
+  }
+
+  @override
+  Future<OtpVerifyResult> verifyEmailOtpResult(String email, String code) async {
+    final j = await _postJson(_u('/auth/otp/verify'), {
+      'email': email,
+      'code': code,
+    });
+    return OtpVerifyResult(
+      userId: j['user_id'] as String?,
+      isNewUser: (j['is_new_user'] ?? false) as bool,
+    );
+  }
+
+  @override
+  Future<String> register({
+    String? phone,
+    String? email,
+    String? displayName,
+    required bool consentAccepted,
+    required String consentVersion,
+    required bool marketingOptIn,
+    required bool ageConfirmed,
+  }) async {
+    final j = await _postJson(
+      _u('/auth/register'),
+      {
+        if (phone != null) 'phone': phone,
+        if (email != null) 'email': email,
+        if (displayName != null && displayName.isNotEmpty)
+          'display_name': displayName,
+        'consent_accepted': consentAccepted,
+        'consent_version': consentVersion,
+        'marketing_opt_in': marketingOptIn,
+        'age_confirmed': ageConfirmed,
+      },
+      okStatuses: const {200, 201},
+    );
     return (j['user_id'] ?? '') as String;
   }
 
@@ -243,6 +420,7 @@ class HttpApiClient implements DesiBazaarApi {
     String? defectDisclosure,
     required int priceSek,
     List<String> mediaIds = const [],
+    String? thumbnailMediaId,
   }) async {
     final j = await _postJson(
       _u('/listings'),
@@ -254,8 +432,9 @@ class HttpApiClient implements DesiBazaarApi {
           'defect_disclosure': defectDisclosure,
         'price_sek': priceSek,
         if (mediaIds.isNotEmpty) 'media_ids': mediaIds,
+        if (thumbnailMediaId != null) 'thumbnail_media_id': thumbnailMediaId,
       },
-      ok: 201,
+      okStatuses: const {200, 201},
     );
     return (j['id'] ?? '') as String;
   }
@@ -283,8 +462,25 @@ class HttpApiClient implements DesiBazaarApi {
         if (profile case var p) 'profile': p,
         if (swishRecipient case var sr) 'swish_recipient': sr,
       },
-      ok: 201,
+      okStatuses: const {200, 201},
     );
+  }
+
+  @override
+  Future<List<AdminUser>> adminUsers() async {
+    final j = await _getJson(_u('/admin/users'));
+    final users = (j['users'] as List?) ?? const [];
+    return users
+        .map((e) => AdminUser.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  @override
+  Future<Map<String, dynamic>> setUserRole({
+    required String userId,
+    required String role,
+  }) async {
+    return _patchJson(_u('/admin/users/$userId'), {'role': role});
   }
 
   @override
@@ -329,7 +525,7 @@ class HttpApiClient implements DesiBazaarApi {
     await _postJson(_u('/orders/$orderId/review'), {
       'rating': rating,
       'text': text,
-    }, ok: 201);
+    }, okStatuses: const {200, 201});
   }
 
   // --- Media (media-ads-contract.md v1, SC-2) ---
@@ -347,7 +543,7 @@ class HttpApiClient implements DesiBazaarApi {
         'content_type': contentType,
         'content_length': contentLength,
       },
-      ok: 201,
+      okStatuses: const {200, 201},
     );
     return MediaUploadTicket.fromJson(j);
   }
@@ -379,7 +575,7 @@ class HttpApiClient implements DesiBazaarApi {
     final j = await _postJson(
       _u('/ads/promotions'),
       {'listing_id': listingId, 'days': days},
-      ok: 201,
+      okStatuses: const {200, 201},
     );
     return Promotion.fromJson(j);
   }
@@ -396,6 +592,44 @@ class HttpApiClient implements DesiBazaarApi {
 
   @override
   String mediaUrl(String mediaId) => '$baseUrl/v1/media/$mediaId';
+
+  @override
+  Future<Dac7Status?> dac7Status() async {
+    final j = await _getJson(_u('/dac7/status'));
+    if ((j['monitoring_enabled'] ?? false) != true) return null;
+    return Dac7Status.fromJson(j);
+  }
+
+  @override
+  Future<String> submitTin(String tin) async {
+    final j = await _postJson(_u('/dac7/tin'), {'tin': tin});
+    return (j['tin_last4'] ?? '') as String;
+  }
+
+  @override
+  Future<List<Dac7SellerRow>> dac7AdminSellers() async {
+    final j = await _getJson(_u('/admin/dac7/sellers'));
+    final items = (j['sellers'] as List?) ?? const [];
+    return items
+        .map((e) => Dac7SellerRow.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  @override
+  Future<bool> setDac7Enabled(bool enabled) async {
+    final j =
+        await _postJson(_u('/admin/dac7/config'), {'monitoring_enabled': enabled});
+    return (j['monitoring_enabled'] ?? false) as bool;
+  }
+
+  @override
+  Future<void> setDac7SellerPaused(
+      String sellerId, bool paused, String reason) async {
+    await _postJson(_u('/admin/dac7/sellers/$sellerId/pause'), {
+      'paused': paused,
+      'reason': reason,
+    });
+  }
 }
 
 /// In-memory fake for widget tests. Records calls so tests can assert
@@ -406,6 +640,7 @@ class FakeApiClient implements DesiBazaarApi {
     this.order,
     this.commandError,
     this.reserveOrder,
+    this.stubAdminUsers = const [],
   });
 
   final List<Listing> listings;
@@ -413,20 +648,85 @@ class FakeApiClient implements DesiBazaarApi {
   final OrderDetail? reserveOrder;
   final ApiException? commandError;
 
+  /// FR-A4: stubbed admin user list.
+  final List<AdminUser> stubAdminUsers;
+
   final List<String> calls = [];
   int? lastReviewRating;
   String? lastReviewText;
   List<String> lastCreateMediaIds = [];
+  String? lastCreateThumbnailId;
   final List<Map<String, dynamic>> commandContexts = [];
 
   @override
-  Future<void> requestOtp(String identifier) async => calls.add('requestOtp:$identifier');
+  Future<void> requestOtp(String phone) async => calls.add('requestOtp:$phone');
 
   @override
-  Future<String> verifyOtp(String identifier, String code) async {
-    calls.add('verifyOtp:$identifier');
+  Future<String> verifyOtp(String phone, String code) async {
+    calls.add('verifyOtp:$phone');
     if (code != '123456') throw ApiException(422, 'Not allowed right now — invalid or expired code');
     return 'buyer-demo';
+  }
+
+  @override
+  Future<OtpVerifyResult> verifyOtpResult(String phone, String code) async {
+    final userId = await verifyOtp(phone, code);
+    return OtpVerifyResult(userId: userId, isNewUser: fakeIsNewUser);
+  }
+
+  @override
+  Future<void> requestEmailOtp(String email) async =>
+      calls.add('requestEmailOtp:$email');
+
+  @override
+  Future<String> verifyEmailOtp(String email, String code) async {
+    calls.add('verifyEmailOtp:$email');
+    if (code != '123456') throw ApiException(422, 'Not allowed right now — invalid or expired code');
+    return 'buyer-demo';
+  }
+
+  @override
+  Future<OtpVerifyResult> verifyEmailOtpResult(String email, String code) async {
+    final userId = await verifyEmailOtp(email, code);
+    return OtpVerifyResult(userId: userId, isNewUser: fakeIsNewUser);
+  }
+
+  /// FR-B1d test hook: make the next verify return isNewUser=true.
+  bool fakeIsNewUser = false;
+
+  @override
+  Future<String> register({
+    String? phone,
+    String? email,
+    String? displayName,
+    required bool consentAccepted,
+    required String consentVersion,
+    required bool marketingOptIn,
+    required bool ageConfirmed,
+  }) async {
+    calls.add('register:${email ?? phone}');
+    lastRegisterConsent = consentAccepted;
+    lastRegisterMarketing = marketingOptIn;
+    lastRegisterVersion = consentVersion;
+    if (!consentAccepted) throw ApiException(422, 'consent required');
+    if (!ageConfirmed) throw ApiException(422, 'age confirmation required');
+    return 'buyer-new';
+  }
+
+  bool? lastRegisterConsent;
+  bool? lastRegisterMarketing;
+  String? lastRegisterVersion;
+
+  @override
+  Future<List<AdminUser>> adminUsers() async => stubAdminUsers;
+
+  @override
+  Future<Map<String, dynamic>> setUserRole({
+    required String userId,
+    required String role,
+  }) async {
+    calls.add('setUserRole:$userId:$role');
+    return {'ok': true, 'user_id': userId, 'new_role': role};
   }
 
   @override
@@ -477,9 +777,11 @@ class FakeApiClient implements DesiBazaarApi {
     String? defectDisclosure,
     required int priceSek,
     List<String> mediaIds = const [],
+    String? thumbnailMediaId,
   }) async {
     calls.add('createListing:$category:${mediaIds.length}media');
     lastCreateMediaIds = List.of(mediaIds);
+    lastCreateThumbnailId = thumbnailMediaId;
     return 'listing-new';
   }
 
@@ -611,4 +913,38 @@ class FakeApiClient implements DesiBazaarApi {
 
   @override
   String mediaUrl(String mediaId) => 'https://fake.invalid/media/$mediaId';
+
+  Dac7Status? nextDac7Status;
+
+  @override
+  Future<Dac7Status?> dac7Status() async {
+    calls.add('dac7Status');
+    return nextDac7Status;
+  }
+
+  @override
+  Future<String> submitTin(String tin) async {
+    calls.add('submitTin');
+    return '••••${tin.substring(tin.length - 4)}';
+  }
+
+  List<Dac7SellerRow> nextDac7Rows = const [];
+
+  @override
+  Future<List<Dac7SellerRow>> dac7AdminSellers() async {
+    calls.add('dac7AdminSellers');
+    return nextDac7Rows;
+  }
+
+  @override
+  Future<bool> setDac7Enabled(bool enabled) async {
+    calls.add('setDac7Enabled:$enabled');
+    return enabled;
+  }
+
+  @override
+  Future<void> setDac7SellerPaused(
+      String sellerId, bool paused, String reason) async {
+    calls.add('setDac7SellerPaused:$sellerId:$paused');
+  }
 }

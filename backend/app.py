@@ -16,7 +16,11 @@ Run:  .venv/bin/uvicorn app:app --port 8100   (from this directory)
 """
 import sys
 import os
+import re as _re
 import uuid
+import smtplib
+import ssl as _ssl
+from email.message import EmailMessage as _EmailMessage
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -117,9 +121,6 @@ def list_listings(q: str | None = None, x_principal: str | None = Header(default
         items.append({
             "id": lid, "category": l["category"], "condition": l["condition"],
             "size_text": l["size_text"], "price_sek": l["price_sek"],
-            # BUG-005 fix: seller ownership is returned so the seller app can
-            # show a true "my listings" list.
-            "seller_id": l["seller_id"],
             "seller_badge": {"scope": seller["badge_scope"], "date": seller["badge_date"]},
             "units_available": sum(1 for u in l["units"] if units[u]["status"] == "available"),
             # SC-1: active promotions rank first, labelled "Sponsored".
@@ -249,9 +250,73 @@ OTP_WINDOW_S = 600          # ...per 10 minutes per phone, then 429
 OTP_TTL_S = 300             # code valid 5 minutes
 REAUTH_WINDOW_S = 600       # fresh OTP verify required within 10 min (FR-S6 re-auth stub)
 
-otp_store = {}              # identifier (phone or email) -> {"code": str, "expires_at": float, "requests": [float, ...]}
+otp_store = {}              # phone/email -> {"code": str, "expires_at": float, "requests": [float, ...]}
 applications = {}           # application_id -> application record
 reapply_used = set()        # phones that already consumed their one re-application (FR-S5)
+
+
+# --- Email OTP delivery (FR-B1a) -------------------------------------------
+# Configured via environment variables. When SMTP_* are unset, codes fall back
+# to console logging (dev stub behaviour).
+#   SMTP_HOST  (e.g. smtp.mail.yahoo.com for Turbify/Yahoo Small Business)
+#   SMTP_PORT  (465 = SSL, 587 = STARTTLS)
+#   SMTP_USER  (full email address)
+#   SMTP_PASS  (account password or app-specific password)
+#   SMTP_FROM  (sender address shown to recipient; defaults to SMTP_USER)
+
+def _smtp_configured():
+    return bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_USER")
+                and os.environ.get("SMTP_PASS"))
+
+
+def _send_otp_email(to_email, code):
+    """Send the OTP code via SMTP. Returns True on success, False otherwise."""
+    host = os.environ.get("SMTP_HOST", "smtp.mail.yahoo.com")
+    port = int(os.environ.get("SMTP_PORT", "465"))
+    user = os.environ["SMTP_USER"]
+    password = os.environ["SMTP_PASS"]
+    sender = os.environ.get("SMTP_FROM", user)
+
+    msg = _EmailMessage()
+    msg["Subject"] = "Your Desi Bazaar sign-in code"
+    msg["From"] = f"Desi Bazaar <{sender}>"
+    msg["To"] = to_email
+    msg.set_content(
+        f"Your Desi Bazaar sign-in code is: {code}\n\n"
+        f"This code expires in 5 minutes. If you didn't request it, ignore this email.\n\n"
+        f"— Desi Bazaar (Baltic Systems AB)"
+    )
+
+    try:
+        if port == 465:
+            context = _ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context,
+                                  timeout=15) as server:
+                server.login(user, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=15) as server:
+                server.starttls(context=_ssl.create_default_context())
+                server.login(user, password)
+                server.send_message(msg)
+        print(f"[OTP email] sent to {to_email}")
+        return True
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[OTP email] FAILED to {to_email}: AUTH FAILED ({e}). "
+              f"Yahoo/Turbify requires an app-specific password, not the "
+              f"account password. Generate one at Yahoo Account Security > "
+              f"App passwords. Also verify SMTP_HOST is smtp.bizmail.yahoo.com "
+              f"for Turbify.")
+        return False
+    except (ConnectionResetError, BrokenPipeError, _ssl.SSLError,
+            smtplib.SMTPServerDisconnected) as e:
+        print(f"[OTP email] FAILED to {to_email}: CONNECTION LOST ({e}). "
+              f"Likely causes: wrong SMTP_HOST/PORT, firewall blocking, or "
+              f"Yahoo rejecting the connection (check app-specific password).")
+        return False
+    except Exception as e:
+        print(f"[OTP email] FAILED to {to_email}: {type(e).__name__}: {e}")
+        return False
 
 
 def _now_iso():
@@ -262,20 +327,16 @@ def _users_with_phone(phone):
     return [u for u in USERS.values() if u.get("phone") == phone]
 
 
+def _user_with_identifier(identifier):
+    """Find a user by phone OR email (FR-B1b: one account, either identifier)."""
+    for u in USERS.values():
+        if u.get("phone") == identifier or u.get("email") == identifier:
+            return u
+    return None
+
+
 def _latest_seller_with_phone(phone):
     sellers = [u for u in _users_with_phone(phone) if u.get("role") == "seller"]
-    return sellers[-1] if sellers else None
-
-
-def _users_with_identifier(ident):
-    """Find users by phone (exact) or email (case-insensitive). FR-B1."""
-    low = ident.lower()
-    return [u for u in USERS.values()
-            if u.get("phone") == ident or str(u.get("email") or "").lower() == low]
-
-
-def _latest_seller_with_identifier(ident):
-    sellers = [u for u in _users_with_identifier(ident) if u.get("role") == "seller"]
     return sellers[-1] if sellers else None
 
 
@@ -290,15 +351,20 @@ def _missing_fields(body, required):
 
 @app.post("/v1/auth/otp/request")
 def otp_request(body: dict):
-    """OTP registration stub (FR-B1, DB-TC-126). Phone or email identifier.
-    Synthetic codes only, logged to console, never sent via SMS/email."""
-    phone = (body.get("phone") or "").strip()
-    email = (body.get("email") or "").strip().lower()
-    if not phone and not email:
+    """OTP request (FR-B1, FR-B1a, DB-TC-126).
+
+    Accepts phone OR email as the identifier. Codes are delivered via SMTP
+    email when the identifier is an email address and SMTP is configured;
+    otherwise logged to console (dev stub — same as before).
+    """
+    phone = body.get("phone")
+    email = body.get("email")
+    identifier = email or phone
+    if not identifier:
         raise HTTPException(422, "phone or email is required")
-    ident = email or phone
+    is_email = email is not None
     now = _time.time()
-    entry = otp_store.setdefault(ident, {"requests": []})
+    entry = otp_store.setdefault(identifier, {"requests": []})
     entry["requests"] = [t for t in entry["requests"] if now - t < OTP_WINDOW_S]
     if len(entry["requests"]) >= OTP_MAX_REQUESTS:
         raise HTTPException(429, "rate limited: max 5 OTP requests per 10 minutes")
@@ -306,35 +372,125 @@ def otp_request(body: dict):
     code = f"{_random.randint(0, 999999):06d}"
     entry["code"] = code
     entry["expires_at"] = now + OTP_TTL_S
-    print(f"[OTP stub] code for {ident}: {code} (synthetic — never sent)")
+    if is_email and _smtp_configured():
+        sent = _send_otp_email(email, code)
+        if not sent:
+            # Don't leak the code on failure; client sees a generic error.
+            raise HTTPException(502, "could not send email, try again later")
+    else:
+        print(f"[OTP stub] code for {identifier}: {code} (synthetic — never sent)")
     return {"ok": True, "expires_in_s": OTP_TTL_S}
 
 
 @app.post("/v1/auth/otp/verify")
 def otp_verify(body: dict):
     """Verify an OTP code. Marks the user otp_verified and records a fresh
-    re-auth timestamp (used by the recipient-change guard, FR-S6)."""
-    phone = (body.get("phone") or "").strip()
-    email = (body.get("email") or "").strip().lower()
-    code = body.get("code")
-    if (not phone and not email) or not code:
-        raise HTTPException(422, "phone or email, and code are required")
-    ident = email or phone
-    entry = otp_store.get(ident)
+    re-auth timestamp (used by the recipient-change guard, FR-S6).
+    FR-B1d: returns is_new_user=true when the identifier has no completed
+    registration — the app must show the Registration screen then."""
+    phone, email, code = body.get("phone"), body.get("email"), body.get("code")
+    identifier = email or phone
+    if not identifier or not code:
+        raise HTTPException(422, "phone/email and code are required")
+    entry = otp_store.get(identifier)
     if not entry or entry.get("code") != code or _time.time() > entry.get("expires_at", 0):
         raise HTTPException(422, "invalid or expired code")
-    user = _latest_seller_with_identifier(ident)
+    # FR-B1d: do NOT auto-create the account here. Mark the identifier as
+    # OTP-verified; the /v1/auth/register endpoint creates the user after
+    # GDPR consent. is_new_user drives the Registration screen.
+    verified_identifiers.add(identifier)
+    user = _user_with_identifier(identifier)
     if user is None:
-        others = _users_with_identifier(ident)
-        user = others[-1] if others else None
-    if user is None:
-        uid = f"buyer-{uuid.uuid4().hex[:8]}"  # FR-B1: free buyer registration, no approval
-        user = {"id": uid, "role": "buyer", "name": "", "phone": phone or None,
-                "email": email or None, "otp_verified": False}
-        USERS[uid] = user
+        return {"user_id": None, "otp_verified": True, "is_new_user": True}
     user["otp_verified"] = True
     user["otp_verified_recent_at"] = _time.time()
-    return {"user_id": user["id"], "otp_verified": True}
+    is_new = not user.get("registration_complete", False)
+    return {"user_id": user["id"], "otp_verified": True,
+            "is_new_user": is_new}
+
+
+# FR-B1d: current privacy notice / terms version. Bumping this forces
+# re-consent (CC7).
+CONSENT_VERSION = "v1"
+
+# Identifiers with a successful OTP verification in this process lifetime.
+# Production: bind to a signed session token instead of process memory.
+verified_identifiers: set = set()
+
+# Registration rate limiting: max attempts per identifier per hour (V7).
+_register_attempts: dict = {}
+
+
+def _valid_email(email: str) -> bool:
+    """Simplified RFC 5322 check (FR-B1c)."""
+    if not isinstance(email, str) or len(email) > 254:
+        return False
+    return bool(_re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$",
+                          email))
+
+
+def _valid_phone(phone: str) -> bool:
+    """E.164-ish check: optional +, 7–15 digits."""
+    if not isinstance(phone, str):
+        return False
+    return bool(_re.match(r"^\+?[0-9]{7,15}$", phone.strip()))
+
+
+@app.post("/v1/auth/register", status_code=201)
+def auth_register(body: dict):
+    """Complete first-time registration after OTP verification (FR-B1d §3.3.1).
+    All consent validations are enforced server-side."""
+    phone, email = body.get("phone"), body.get("email")
+    identifier = email or phone
+    if not identifier:
+        raise HTTPException(422, "phone/email is required")
+    # V6: identifier format validation.
+    if email and not _valid_email(email):
+        raise HTTPException(422, "invalid email address")
+    if phone and not _valid_phone(phone):
+        raise HTTPException(422, "invalid phone number")
+    # V1: OTP must have been verified for this identifier (no skipping).
+    if identifier not in verified_identifiers:
+        raise HTTPException(422, "OTP verification required before registration")
+    # V7: rate limit registration attempts (anti-enumeration).
+    now = _time.time()
+    attempts = [t for t in _register_attempts.get(identifier, [])
+                if now - t < 3600]
+    if len(attempts) >= 10:
+        raise HTTPException(429, "too many registration attempts — try later")
+    attempts.append(now)
+    _register_attempts[identifier] = attempts
+    # V5: idempotent — already-registered identifier returns the existing user.
+    existing = _user_with_identifier(identifier)
+    if existing is not None and existing.get("registration_complete"):
+        return {"user_id": existing["id"], "is_new_user": False,
+                "already_registered": True}
+    # V2: explicit consent is mandatory.
+    if body.get("consent_accepted") is not True:
+        raise HTTPException(422, "privacy notice and terms must be accepted")
+    # V3: consent version must be current.
+    if body.get("consent_version") != CONSENT_VERSION:
+        raise HTTPException(422,
+                            f"consent version outdated — current is {CONSENT_VERSION}")
+    # V4: age confirmation is mandatory.
+    if body.get("age_confirmed") is not True:
+        raise HTTPException(422, "you must confirm you are 18 or older")
+    uid = f"buyer-{uuid.uuid4().hex[:8]}"  # FR-B1: free buyer, no approval
+    user = {
+        "id": uid, "role": "buyer",
+        "name": (body.get("display_name") or "").strip(),
+        "phone": phone, "email": email,
+        "otp_verified": True, "otp_verified_recent_at": now,
+        # FR-B1d GDPR consent record (G4).
+        "registration_complete": True,
+        "consent_accepted": True,
+        "consent_version": CONSENT_VERSION,
+        "consent_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "marketing_opt_in": bool(body.get("marketing_opt_in", False)),
+        "age_confirmed": True,
+    }
+    USERS[uid] = user
+    return {"user_id": uid, "is_new_user": True}
 
 
 @app.post("/v1/sellers/applications", status_code=201)
@@ -560,6 +716,10 @@ def create_listing(body: dict, x_principal: str | None = Header(default=None)):
         raise HTTPException(422, f"max {LISTING_MAX_IMAGES} images per listing (SC-2)")
     if len(videos) > LISTING_MAX_VIDEOS:
         raise HTTPException(422, f"max {LISTING_MAX_VIDEOS} videos per listing (SC-2)")
+    # FR-L5a: seller-chosen thumbnail must be one of the listing's own images.
+    thumbnail = body.get("thumbnail_media_id")
+    if thumbnail is not None and thumbnail not in images:
+        raise HTTPException(422, "thumbnail must be one of the listing's images")
     lid = f"listing-{uuid.uuid4().hex[:8]}"
     unit_id = f"unit-{uuid.uuid4().hex[:8]}"
     LISTINGS[lid] = {
@@ -568,9 +728,11 @@ def create_listing(body: dict, x_principal: str | None = Header(default=None)):
         "defect_disclosure": body.get("defect_disclosure"),
         "price_sek": body["price_sek"], "units": [unit_id],
         "media_ids": media_ids,
+        "thumbnail_media_id": thumbnail or (images[0] if images else None),
     }
     units[unit_id] = {"listing_id": lid, "status": "available"}
-    return {"id": lid, "status": "created", "media_ids": media_ids}
+    return {"id": lid, "status": "created", "media_ids": media_ids,
+            "thumbnail_media_id": LISTINGS[lid]["thumbnail_media_id"]}
 
 
 # ------------------------------------------------------------------
@@ -838,3 +1000,278 @@ for _sp in SEED_PROMOTIONS:
         "created_at": _now_iso(), "decided_by": "admin-1", "decided_at": _now_iso(),
         "payment": "seed (synthetic)",
     }
+
+
+# ---------------------------------------------------------------------------
+# DAC7 seller threshold monitoring (SC-5, FR-D1–D10)
+# Synthetic slice: in-memory counters derived from order records.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+# Feature flag — disable everything DAC7 at any time (FR-D1).
+dac7_config = {"monitoring_enabled": True}
+
+# Thresholds (pending legal confirmation — see SRS §3.13 legal note).
+DAC7_TX_THRESHOLD = 30
+DAC7_EUR_THRESHOLD = 2000.0
+DAC7_WARN_TX = (20, 25)          # yellow, orange
+DAC7_WARN_EUR = (1200.0, 1600.0) # yellow, orange
+DAC7_TIN_GRACE_DAYS = 14
+SEK_PER_EUR = 11.0  # synthetic rate for slice; production uses ECB daily rate
+
+# seller_id -> {"tin_last4": str|None, "tin_provided_at": str|None,
+#               "paused": bool, "pause_reason": str|None,
+#               "red_at": str|None, "warnings": [ {tier, at, channel} ]}
+dac7_sellers = {}
+
+
+def _dac7_year():
+    return _dt.datetime.now(_dt.timezone.utc).year
+
+
+def _dac7_counters(seller_id):
+    """Derive per-year counters from order records (FR-D2). Server-side only."""
+    year = _dac7_year()
+    tx = 0
+    eur = 0.0
+    for oid, o in orders.items():
+        # Order holds seller via listing units; resolve via meta snapshots
+        meta = snapshots.get(oid, {})
+        if meta.get("seller_id") != seller_id:
+            continue
+        created = meta.get("created_at", "")
+        try:
+            oyear = int(created[:4])
+        except (ValueError, TypeError):
+            continue
+        if oyear != year:
+            continue
+        # Count completed sales (delivered / reviewed states)
+        if getattr(o, "status", "") in ("delivered", "reviewed", "completed"):
+            tx += 1
+            # Amount from listing price (SEK) converted to EUR
+            price_sek = float(meta.get("price_sek", 0) or 0)
+            eur += price_sek / SEK_PER_EUR
+    return {"transactions": tx, "eur": round(eur, 2), "year": year}
+
+
+def _dac7_tier(counters):
+    tx, eur = counters["transactions"], counters["eur"]
+    if tx >= DAC7_TX_THRESHOLD or eur >= DAC7_EUR_THRESHOLD:
+        return "red"
+    if tx >= DAC7_WARN_TX[1] or eur >= DAC7_WARN_EUR[1]:
+        return "orange"
+    if tx >= DAC7_WARN_TX[0] or eur >= DAC7_WARN_EUR[0]:
+        return "yellow"
+    return "none"
+
+
+def _dac7_ensure(seller_id):
+    return dac7_sellers.setdefault(seller_id, {
+        "tin_last4": None, "tin_provided_at": None,
+        "paused": False, "pause_reason": None,
+        "red_at": None, "warnings": [],
+    })
+
+
+def _dac7_check_and_warn(seller_id):
+    """Evaluate thresholds after a sale; fire warnings (FR-D5). Returns tier."""
+    if not dac7_config["monitoring_enabled"]:
+        return "disabled"
+    counters = _dac7_counters(seller_id)
+    tier = _dac7_tier(counters)
+    rec = _dac7_ensure(seller_id)
+    # Fire warning once per tier escalation
+    fired = {w["tier"] for w in rec["warnings"]}
+    if tier in ("yellow", "orange", "red") and tier not in fired:
+        now = _now_iso()
+        for channel in ("in_app", "email"):
+            rec["warnings"].append({"tier": tier, "at": now, "channel": channel})
+        if tier == "red" and rec["red_at"] is None:
+            rec["red_at"] = now
+    return tier
+
+
+@app.get("/v1/dac7/status")
+def dac7_status(x_principal: str | None = Header(default=None)):
+    """Seller's own DAC7 counter + tier (FR-D4)."""
+    user = principal(x_principal)
+    if not dac7_config["monitoring_enabled"]:
+        return {"monitoring_enabled": False}
+    seller_id = user["id"] if isinstance(user, dict) else user
+    counters = _dac7_counters(seller_id)
+    rec = _dac7_ensure(seller_id)
+    return {
+        "monitoring_enabled": True,
+        "year": counters["year"],
+        "transactions": counters["transactions"],
+        "transactions_threshold": DAC7_TX_THRESHOLD,
+        "eur": counters["eur"],
+        "eur_threshold": DAC7_EUR_THRESHOLD,
+        "tier": _dac7_tier(counters),
+        "tin_provided": rec["tin_last4"] is not None,
+        "tin_last4": ("••••" + rec["tin_last4"]) if rec["tin_last4"] else None,
+        "paused": rec["paused"],
+        "pause_reason": rec["pause_reason"],
+        "red_at": rec["red_at"],
+    }
+
+
+@app.post("/v1/dac7/tin")
+def dac7_submit_tin(body: dict, x_principal: str | None = Header(default=None)):
+    """Submit TIN at RED tier (FR-D6). Stored masked; reactivates if paused."""
+    user = principal(x_principal)
+    if not dac7_config["monitoring_enabled"]:
+        raise HTTPException(404, "DAC7 monitoring is disabled")
+    tin = (body.get("tin") or "").strip().replace(" ", "").replace("-", "")
+    if not tin or len(tin) < 6:
+        raise HTTPException(422, "a valid tax identification number is required")
+    seller_id = user["id"] if isinstance(user, dict) else user
+    rec = _dac7_ensure(seller_id)
+    # Slice stores only last-4 (production encrypts full value, NFR-S2 pattern)
+    rec["tin_last4"] = tin[-4:]
+    rec["tin_provided_at"] = _now_iso()
+    if rec["paused"] and rec["pause_reason"] == "dac7_tin_missing":
+        rec["paused"] = False
+        rec["pause_reason"] = None
+    return {"ok": True, "tin_last4": "••••" + tin[-4:], "reactivated": not rec["paused"]}
+
+
+@app.get("/v1/admin/dac7/sellers")
+def dac7_admin_sellers(x_principal: str | None = Header(default=None)):
+    """Admin view: sellers ranked by threshold proximity (FR-D8)."""
+    user = principal(x_principal)
+    _require_admin(user)
+    if not dac7_config["monitoring_enabled"]:
+        return {"monitoring_enabled": False, "sellers": []}
+    rows = []
+    seen = set(dac7_sellers.keys())
+    # Include sellers with order activity even if never warned
+    for oid, meta in snapshots.items():
+        sid = meta.get("seller_id")
+        if sid:
+            seen.add(sid)
+    for sid in seen:
+        counters = _dac7_counters(sid)
+        rec = _dac7_ensure(sid)
+        # Proximity = max of tx-ratio, eur-ratio
+        prox = max(counters["transactions"] / DAC7_TX_THRESHOLD,
+                   counters["eur"] / DAC7_EUR_THRESHOLD)
+        rows.append({
+            "seller_id": sid,
+            "transactions": counters["transactions"],
+            "eur": counters["eur"],
+            "tier": _dac7_tier(counters),
+            "proximity": round(prox, 3),
+            "tin_provided": rec["tin_last4"] is not None,
+            "paused": rec["paused"],
+            "red_at": rec["red_at"],
+            "warnings": len(rec["warnings"]),
+        })
+    rows.sort(key=lambda r: r["proximity"], reverse=True)
+    return {"monitoring_enabled": True, "sellers": rows}
+
+
+@app.post("/v1/admin/dac7/config")
+def dac7_admin_config(body: dict, x_principal: str | None = Header(default=None)):
+    """Toggle DAC7 monitoring on/off at any time (FR-D1)."""
+    user = principal(x_principal)
+    _require_admin(user)
+    if "monitoring_enabled" in body:
+        dac7_config["monitoring_enabled"] = bool(body["monitoring_enabled"])
+    return {"monitoring_enabled": dac7_config["monitoring_enabled"]}
+
+
+@app.post("/v1/admin/dac7/sellers/{seller_id}/pause")
+def dac7_admin_pause(seller_id: str, body: dict,
+                     x_principal: str | None = Header(default=None)):
+    """Manual pause/unpause with recorded reason (FR-D8, FR-A2 audit)."""
+    user = principal(x_principal)
+    _require_admin(user)
+    rec = _dac7_ensure(seller_id)
+    pause = bool(body.get("paused", True))
+    reason = (body.get("reason") or "").strip()
+    if pause and not reason:
+        raise HTTPException(422, "a reason is required to pause a seller")
+    rec["paused"] = pause
+    rec["pause_reason"] = reason if pause else None
+    admin_id = user["id"] if isinstance(user, dict) else user
+    # Audit trail (FR-A2)
+    audit_log.append({
+        "at": _now_iso(), "by": admin_id, "action": "dac7_pause" if pause else "dac7_unpause",
+        "seller_id": seller_id, "reason": reason,
+    })
+    return {"ok": True, "seller_id": seller_id, "paused": pause}
+
+
+@app.get("/v1/admin/users")
+def admin_list_users(x_principal: str | None = Header(default=None)):
+    """List all users with their roles (FR-A4). Admin only."""
+    user = principal(x_principal)
+    _require_admin(user)
+    return {"users": [
+        {"id": u["id"], "role": u["role"], "name": u.get("name", ""),
+         "phone": u.get("phone"), "email": u.get("email"),
+         "status": u.get("status")}
+        for u in USERS.values()
+    ]}
+
+
+@app.patch("/v1/admin/users/{user_id}")
+def admin_set_role(user_id: str, body: dict,
+                   x_principal: str | None = Header(default=None)):
+    """Change a user's role (FR-A4). All admins have equal rights.
+    Refuses to demote the last remaining admin. Audit-logged (FR-A2)."""
+    user = principal(x_principal)
+    _require_admin(user)
+    target = USERS.get(user_id)
+    if target is None:
+        raise HTTPException(404, "user not found")
+    new_role = (body.get("role") or "").strip()
+    if new_role not in ("admin", "seller", "buyer"):
+        raise HTTPException(422, "role must be admin, seller, or buyer")
+    old_role = target["role"]
+    if old_role == new_role:
+        return {"ok": True, "user_id": user_id, "role": new_role,
+                "unchanged": True}
+    if old_role == "admin" and new_role != "admin":
+        remaining = [u for u in USERS.values()
+                     if u["role"] == "admin" and u["id"] != user_id]
+        if not remaining:
+            raise HTTPException(422, "cannot demote the last admin")
+    target["role"] = new_role
+    admin_id = user["id"] if isinstance(user, dict) else user
+    audit_log.append({
+        "at": _now_iso(), "by": admin_id, "action": "role_change",
+        "user_id": user_id, "old_role": old_role, "new_role": new_role,
+    })
+    return {"ok": True, "user_id": user_id,
+            "old_role": old_role, "new_role": new_role}
+
+
+def dac7_sweep_pauses():
+    """Auto-pause sellers 14+ days past RED without TIN (FR-D7). Called after sales."""
+    if not dac7_config["monitoring_enabled"]:
+        return []
+    now = _dt.datetime.now(_dt.timezone.utc)
+    paused = []
+    for sid, rec in dac7_sellers.items():
+        if rec["paused"] or rec["tin_last4"] or not rec["red_at"]:
+            continue
+        try:
+            red = _dt.datetime.fromisoformat(rec["red_at"])
+        except (ValueError, TypeError):
+            continue
+        if (now - red).days >= DAC7_TIN_GRACE_DAYS:
+            rec["paused"] = True
+            rec["pause_reason"] = "dac7_tin_missing"
+            paused.append(sid)
+    return paused
+
+
+# Audit log for admin actions (FR-A2) — created here if not defined earlier.
+try:
+    audit_log
+except NameError:
+    audit_log = []
