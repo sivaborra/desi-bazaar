@@ -6,15 +6,19 @@ A marketplace mobile app (iOS + Android) for the South Asian community in Sweden
 
 Built as a portfolio/showcase project by [Baltic Systems AB](https://balticitsystems.com), demonstrating spec-first engineering: frozen requirements → adversarial review → implementation with honest test evidence.
 
-## Screenshots
+## Screenshots (v1.12.3, 2026-10-12)
 
-| Sign in | Browse | Listing |
+| Browse (Diwali theme) | Seller home | Create listing |
 |---|---|---|
-| ![Sign in](docs/images/screen-auth.png) | ![Browse](docs/images/screen-browse.png) | ![Listing detail](docs/images/screen-listing.png) |
+| ![Browse](docs/images/screen-browse-diwali.jpg) | ![Seller](docs/images/screen-seller.jpg) | ![Create listing](docs/images/screen-create-listing.jpg) |
 
-| Seller home | Admin queue |
-|---|---|
-| ![Seller home](docs/images/screen-seller.png) | ![Admin queue](docs/images/screen-admin.png) |
+| Listing detail + checkout | Order tracker | Appearance themes |
+|---|---|---|
+| ![Listing detail](docs/images/screen-listing-detail.jpg) | ![Order tracker](docs/images/screen-order-tracker.jpg) | ![Appearance](docs/images/screen-appearance.jpg) |
+
+| Registration | Become a seller | Promote listing |
+|---|---|---|
+| ![Register](docs/images/screen-register.jpg) | ![Become seller](docs/images/screen-become-seller.jpg) | ![Promote](docs/images/screen-promote-pricing.jpg) |
 
 ## Architecture
 
